@@ -11,17 +11,27 @@ from pymongo import errors
 from datetime import datetime, timedelta
 import copy
 
+"""
+Python utility to fetch collection/index stats of all database.collection namespaces with in provided mongodb cluster.
+  1. It fetches collection/index stats for each database.collection namespace using collstat command.
+  2. From each collstat response it fetches/generates requested metric document. This utility demonstrates how to fetch 
+      below metrics.
+         - document count for each database.collection namespace.
+         - collection size in bytes.
+         - index size in bytes for each database.collection namespace.
+  3. It stores generated metric document to mgmt database in daily collection. 
+"""
+
 # logger configuration
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(name)s %(levelname)s %(message)s')
 logger = logging.getLogger(os.path.basename(sys.argv[0]))
 
-# To run 'collstats' on these mongodb internal databases/collections,
-# typically user needs "__system" privilege. In many prod environments
-# no users would have this privilege, so ignoring it right now
+# To run 'collstats' on these mongodb internal databases/collections,typically user needs "__system" privilege.
+# In many prod environments,no users would have this privilege, so ignoring them right now
 mongodb_internal_databases = ['admin', 'local']
 mongodb_internal_collections = ['system.sessions']
 
-
+# Which metric documents are needed to be generated from collstat response.
 metrics_to_be_fetched = ['collection_docs_count', 'collection_size_bytes', 'index_size_bytes']
 
 
@@ -50,7 +60,7 @@ def auto_reattempt(func):
 @auto_reattempt
 def get_collection_stats(l_db, l_collection):
     """
-    Run CollStats for provided db and collection. Return collstats response.
+    Run CollStats for provided database and collection. Return collstats response.
     :param l_db: database name
     :param l_collection: collection name
     :return: collstats response
@@ -63,22 +73,22 @@ def get_collection_stats(l_db, l_collection):
 
 def fetch_metrics_frm_collection_stats(l_db, l_collection, l_collection_stats, l_docs):
     '''
-    This function iterates over metrics to be fetched. It prepares json/ mongodb document for each metric.
-    Idea is to create one document per requested metric from collstats response.
-    Overall metric doc structure is
-    doc['db'] = database name
-    doc['coll'] = collection name
-    doc["metric_name"] can be
-      1. collection_docs_count representing docs count for provided collection
-      2. collection_size_bytes representing size of collection fetched from collstats in bytes
-      3. index_size_bytes_+index_name representing size of individual index in bytes fetched from collstats
-    Creating one document for each index.
-    doc['metric_value'] value of relavant metric
+    - This function iterates over metrics to be fetched. It prepares json/ mongodb document for each metric.
+    - Idea is to create one document per requested metric from collstats response.
+    - Example json/mongodb metric document structure
+        doc['db'] = database name
+        doc['coll'] = collection name
+        doc["metric_name"] can be
+                1. collection_docs_count representing docs count for provided collection
+                2. collection_size_bytes representing size of collection fetched from collstats in bytes
+                3. index_size_bytes_+index_name representing size of individual index in bytes fetched from collstats
+                   one document will be created for each metrics.
+        doc['metric_value'] value of relevant metric
 
-    - Overall, creating one doc for each metric. Individual index size, collection size or collection doc count
-    can be one metric.
-    - Keeping field name helps while retrieving  documents. Especially metric_name can be indexed.
-    - If same docs needs to be inserted in ELK , less number of fields can improve performance
+    - Overall, creating one document for each metric. Individual index size, collection size or collection doc count
+    can represent one metric document.
+    - Keeping same field name helps while retrieving  documents. metric_name can be indexed.
+    - If same docs needs to be inserted in ELK , less number of fields can improve search performance
 
     :param l_db: database name
     :param l_collection: collection name
@@ -114,7 +124,7 @@ def fetch_metrics_frm_collection_stats(l_db, l_collection, l_collection_stats, l
 @auto_reattempt
 def batch_insert_docs(docs):
     '''
-    Idea is if number of metric documents increases more than batch size, save them in mongodb.
+    If number of metric documents increases more than batch size, save them in mongodb.
     insert_many is more efficient than insert_one
     :param docs: metric documents to be published
     :return: metric documents
@@ -128,15 +138,6 @@ def batch_insert_docs(docs):
 
 
 def gather_collection_stats():
-    '''
-    # Overall Script does below at high level
-        # 1. Iterate over each database.
-        # 2. Iterate over each collection with in database.
-        # 3. Run collstats command for each collection.
-        # 4. Fetch requested information out of collection_stats response.
-        # 5. Store them in mgmt database with daily collection.
-    :return:
-    '''
     docs = []
 
     for db in mongo_client.list_database_names():
@@ -153,7 +154,7 @@ def gather_collection_stats():
                     docs = fetch_metrics_frm_collection_stats(db, collection, collection_stats, docs)
                     docs = batch_insert_docs(docs)
 
-    ## Flush remaining docs
+    ## Flush remaining metric docs
     result = mongo_client[mongodb_mgmt_database][mongodb_mgmt_collection].insert_many(docs, ordered=False)
     docs = []
     logger.info("Number of Documents Inserted {} ".format(len(result.inserted_ids)))
@@ -165,27 +166,27 @@ def gather_collection_stats():
 
 
 logger.info(sys.argv[:])
-parser = argparse.ArgumentParser(description="Mongodb Fetch Collection Counts")
+parser = argparse.ArgumentParser(description="Mongodb Fetch Collection Index stats")
 
 required_names = parser.add_argument_group('required arguments')
 optional_names = parser.add_argument_group('optional arguments')
 required_names.add_argument("-m", "--mognodbUriToBeScannedForCollectionStats",
                             help='MongoDB connection uri e.g. mongodb://dbadmin:xyz@shpmgs'
                                  '-mongo-01.renaissance-golabs.com:27017' \
-                                 '/?connectTimeoutMS=300000 for sharded cluster where RpClientId is needed to be tagged'
+                                 '/?connectTimeoutMS=300000'
                             , required=True)
 actions_parser = parser.add_argument_group('actions')
 
 actions_parser.add_argument("--gather_collection_stats", dest='action',
                             action='store_const', const=gather_collection_stats,
-                            help='Gather collection counts for all collections with in provided mongodb cluster ')
+                            help='Gather collection/index counts for all collections with in provided mongodb cluster ')
 args = parser.parse_args()
 
 # based on the argument passed, this will call the "const" function from the parser config
 if args.action is None:
     parser.parse_args(['-h'])
 
-logger.info("Connecting to Sharded Cluster  " + args.mognodbUriToBeScannedForCollectionStats)
+logger.info("Connecting to mongodb Cluster  " + args.mognodbUriToBeScannedForCollectionStats)
 try:
     mongo_client = MongoClient(args.mognodbUriToBeScannedForCollectionStats)
     now = datetime.now()
